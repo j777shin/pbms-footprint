@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.DS_Store
+.pytest_cache/
+.mypy_cache/
+
+# local secrets
+.env
+
+# local outputs
+geo_outputs/
+
+
