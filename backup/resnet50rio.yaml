@@ -1,0 +1,42 @@
+Segmentation: binary
+
+Model:
+  name: ReFineNet
+  param:
+    backbone: resnet50
+
+Criterion:
+    name: Dice
+    dice_weights: 1.0
+
+Loader:
+    root: /home/ippws/building-footprint-segmentation/data/rio/building_patches
+    image_normalizer: divide_by_255
+    label_normalizer: binary_label
+    augmenters:
+      - horizontal_flip
+      - vertical_flip
+      - rotation: 15
+    batch_size: 16
+    
+
+
+Metrics:
+  - accuracy
+  - precision
+  - f1
+  - recall
+  - iou
+
+Optimizer:
+  name: AdamW
+  param:
+    lr:1e-5
+
+Callbacks:
+  log_dir: '/home/ippws/building-footprint-segmentation/logs/mass_building_seg/'
+  callers:
+    - TrainChkCallback
+    - TimeCallback
+    - TensorBoardCallback
+    - TrainStateCallback
