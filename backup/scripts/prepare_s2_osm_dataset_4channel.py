@@ -82,11 +82,30 @@ def _save_4channel_image(out_path: Path, rgb_uint8, osm_mask01) -> None:
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    osm_channel = (osm_mask01.astype(np.uint8) * 255)
+    # Ensure RGB is in correct format (HxWx3)
+    if rgb_uint8.shape[2] != 3:
+        raise ValueError(f"Expected RGB image with 3 channels, got {rgb_uint8.shape}")
     
+    # Convert OSM mask to uint8 [0, 255] and ensure it's 2D
+    if osm_mask01.ndim == 2:
+        osm_channel = (osm_mask01.astype(np.uint8) * 255)
+    else:
+        osm_channel = osm_mask01.astype(np.uint8)
+        if osm_channel.ndim > 2:
+            osm_channel = osm_channel.squeeze()
+    
+    # Stack RGB + OSM mask to create 4-channel image (HxWx4)
     four_channel = np.dstack([rgb_uint8, osm_channel])
     
-    cv2.imwrite(str(out_path), four_channel)
+    # OpenCV's imwrite with 4 channels saves as RGBA, but we need RGB+mask format
+    # Save using PIL which better preserves arbitrary channel formats
+    try:
+        from PIL import Image
+        pil_img = Image.fromarray(four_channel, mode='RGBA')
+        pil_img.save(str(out_path), 'PNG')
+    except ImportError:
+        # Fallback to OpenCV (may lose 4th channel or convert to RGBA)
+        cv2.imwrite(str(out_path), four_channel)
 
 
 def _save_label(out_lbl: Path, osm_mask01) -> None:
@@ -123,6 +142,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--overpass-retry-sleep-s", type=float, default=3.0)
     p.add_argument("--fail-on-overpass-error", action="store_true", default=False)
     p.add_argument("--out-root", type=str, default="data/s2_osm_4ch/building_patches")
+    
+    # Super resolution options
+    p.add_argument("--use-sr", action="store_true", default=False, help="Apply super resolution to images and labels")
+    p.add_argument("--sr-scale-factor", type=int, default=4, help="Super resolution scale factor (default: 4 = 10m -> 2.5m)")
+    p.add_argument("--sr-method", type=str, default="bicubic", choices=["bicubic", "bilinear", "lanczos"], help="SR interpolation method")
+    p.add_argument("--sr-real-esrgan", action="store_true", default=False, help="Use Real-ESRGAN for super resolution")
+    
     return p
 
 
@@ -188,11 +214,38 @@ def main(argv: Optional[list] = None) -> int:
                 time.sleep(float(args.sleep_s))
                 continue
 
+            # Apply super resolution if enabled
+            rgb_final = s2.rgb
+            mask_final = mask01
+            if args.use_sr:
+                from building_footprint_segmentation.geo.super_resolution import apply_super_resolution
+                import cv2
+                import numpy as np
+                
+                try:
+                    rgb_final = apply_super_resolution(
+                        s2.rgb,
+                        scale_factor=int(args.sr_scale_factor),
+                        method=args.sr_method,
+                        use_real_esrgan=bool(args.sr_real_esrgan),
+                    )
+                    # Upscale mask using nearest neighbor
+                    h, w = mask01.shape
+                    mask_final = cv2.resize(
+                        mask01.astype(np.uint8),
+                        (w * int(args.sr_scale_factor), h * int(args.sr_scale_factor)),
+                        interpolation=cv2.INTER_NEAREST
+                    ).astype(np.uint8)
+                except Exception as e:
+                    print(f"[{split}] Super resolution failed: {e}, using original resolution")
+                    rgb_final = s2.rgb
+                    mask_final = mask01
+
             name = f"s2_{split}_{counters[split]:06d}"
             out_img = out_root / split / "images" / f"{name}.png"
             out_lbl = out_root / split / "labels" / f"{name}.png"
-            _save_4channel_image(out_img, s2.rgb, mask01)
-            _save_label(out_lbl, mask01)
+            _save_4channel_image(out_img, rgb_final, mask_final)
+            _save_label(out_lbl, mask_final)
 
             counters[split] += 1
             print(f"[{split}] wrote {name} (lat={lat:.6f}, lon={lon:.6f})")

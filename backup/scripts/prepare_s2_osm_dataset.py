@@ -140,6 +140,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     p.add_argument("--out-root", type=str, default="data/s2_osm/building_patches")
+    
+    # Super resolution options
+    p.add_argument("--use-sr", action="store_true", default=False, help="Apply super resolution to images and labels")
+    p.add_argument("--sr-scale-factor", type=int, default=4, help="Super resolution scale factor (default: 4 = 10m -> 2.5m)")
+    p.add_argument("--sr-method", type=str, default="bicubic", choices=["bicubic", "bilinear", "lanczos"], help="SR interpolation method")
+    p.add_argument("--sr-real-esrgan", action="store_true", default=False, help="Use Real-ESRGAN for super resolution")
+    
     return p
 
 
@@ -211,10 +218,37 @@ def main(argv: Optional[list] = None) -> int:
                 time.sleep(float(args.sleep_s))
                 continue
 
+            # Apply super resolution if enabled
+            rgb_final = s2.rgb
+            mask_final = mask01
+            if args.use_sr:
+                from building_footprint_segmentation.geo.super_resolution import apply_super_resolution
+                import cv2
+                import numpy as np
+                
+                try:
+                    rgb_final = apply_super_resolution(
+                        s2.rgb,
+                        scale_factor=int(args.sr_scale_factor),
+                        method=args.sr_method,
+                        use_real_esrgan=bool(args.sr_real_esrgan),
+                    )
+                    # Upscale mask using nearest neighbor
+                    h, w = mask01.shape
+                    mask_final = cv2.resize(
+                        mask01.astype(np.uint8),
+                        (w * int(args.sr_scale_factor), h * int(args.sr_scale_factor)),
+                        interpolation=cv2.INTER_NEAREST
+                    ).astype(np.uint8)
+                except Exception as e:
+                    print(f"[{split}] Super resolution failed: {e}, using original resolution")
+                    rgb_final = s2.rgb
+                    mask_final = mask01
+
             name = f"s2_{split}_{counters[split]:06d}"
             out_img = out_root / split / "images" / f"{name}.png"
             out_lbl = out_root / split / "labels" / f"{name}.png"
-            _save_pair(out_img, out_lbl, s2.rgb, mask01)
+            _save_pair(out_img, out_lbl, rgb_final, mask_final)
 
             counters[split] += 1
             print(f"[{split}] wrote {name} (lat={lat:.6f}, lon={lon:.6f})")

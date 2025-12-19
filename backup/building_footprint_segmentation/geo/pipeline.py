@@ -22,6 +22,7 @@ from .osm import (
 from .refine import refine_predictions_with_osm
 from .yolo import predict_yolov8_mask_on_rgb
 from .fuse import fuse_binary_masks, FuseMode
+from .super_resolution import apply_super_resolution_adaptive
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,11 @@ def predict_buildings_near_coordinate(
     yolo_iou: float = 0.7,
     yolo_classes: Optional[list] = None,
     fuse_mode: FuseMode = "intersection",
+    # Super Resolution
+    use_super_resolution: bool = False,
+    sr_target_resolution_m: float = 2.5,  # Target resolution (e.g., 2.5m from 10m = 4x)
+    sr_method: str = "bicubic",  # "bicubic", "bilinear", "lanczos"
+    sr_use_real_esrgan: bool = False,  # Use Real-ESRGAN if available
     # Vectorization
     min_area_m2: float = 1.0,
 ) -> NearbyBuildingsResult:
@@ -91,6 +97,24 @@ def predict_buildings_near_coordinate(
         client_secret=sentinelhub_client_secret,
     )
 
+    # Apply super resolution if enabled
+    actual_resolution = resolution_m
+    rgb_for_prediction = s2.rgb
+    if use_super_resolution:
+        print(f"Applying super resolution: {resolution_m}m -> {sr_target_resolution_m}m target...")
+        rgb_for_prediction, actual_resolution = apply_super_resolution_adaptive(
+            s2.rgb,
+            target_resolution_m=sr_target_resolution_m,
+            source_resolution_m=resolution_m,
+            method=sr_method,
+            use_real_esrgan=sr_use_real_esrgan,
+        )
+        print(f"Super resolution applied. Enhanced resolution: {actual_resolution:.2f}m (scale: {resolution_m/actual_resolution:.1f}x)")
+        # Update patch size for model input (it will be resized anyway, but this helps with OSM mask sizing)
+        enhanced_patch_px = rgb_for_prediction.shape[0]
+    else:
+        enhanced_patch_px = patch_px
+
     model = load_refinenet(refinenet_weights_path)
     
     # Check if model is 4-channel (ReFineNet4Ch)
@@ -110,21 +134,25 @@ def predict_buildings_near_coordinate(
         osm_mask01 = rasterize_osm_buildings_to_mask(
             geoms_projected=osm_early.geoms_projected,
             bbox_projected=s2.bbox_projected,
-            out_size=patch_px,
+            out_size=enhanced_patch_px,
         )
         pred = predict_refinenet_on_rgb_osm(
-            model, s2.rgb, osm_mask01,
+            model, rgb_for_prediction, osm_mask01,
             threshold=refinenet_threshold,
-            model_input_size=(patch_px, patch_px)
+            model_input_size=(enhanced_patch_px, enhanced_patch_px)
         )
     else:
-        pred = predict_refinenet_on_rgb(model, s2.rgb, threshold=refinenet_threshold, model_input_size=(patch_px, patch_px))
+        pred = predict_refinenet_on_rgb(
+            model, rgb_for_prediction, 
+            threshold=refinenet_threshold, 
+            model_input_size=(enhanced_patch_px, enhanced_patch_px)
+        )
 
     yolo_mask01 = None
     fused_mask01 = pred.mask
     if yolo_weights:
         ymask = predict_yolov8_mask_on_rgb(
-            s2.rgb,
+            rgb_for_prediction,
             yolo_weights=yolo_weights,
             device=yolo_device,
             conf=yolo_conf,
@@ -179,8 +207,11 @@ def predict_buildings_near_coordinate(
     pred_wgs84 = reproject_geoms_to_wgs84(clipped, from_epsg=s2.projected_epsg)
     geojson_pred = geoms_to_geojson_feature_collection(pred_wgs84, properties={"source": "model"})
 
+    # Use enhanced RGB if super resolution was applied, otherwise original
+    output_rgb = rgb_for_prediction if use_super_resolution else s2.rgb
+    
     return NearbyBuildingsResult(
-        rgb_patch=s2.rgb,
+        rgb_patch=output_rgb,
         projected_epsg=s2.projected_epsg,
         bbox_projected=s2.bbox_projected,
         center_projected=s2.center_projected,

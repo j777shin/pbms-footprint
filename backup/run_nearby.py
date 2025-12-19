@@ -78,6 +78,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--yolo-weights", type=str, default=None)
     p.add_argument("--fuse-mode", type=str, default="intersection", choices=["none", "union", "intersection", "refinenet_only", "yolo_only"])
+    
+    p.add_argument("--use-sr", action="store_true", default=False, help="Enable super resolution to enhance imagery")
+    p.add_argument("--sr-target-res", type=float, default=2.5, help="Target resolution in meters (e.g., 2.5m from 10m = 4x)")
+    p.add_argument("--sr-method", type=str, default="bicubic", choices=["bicubic", "bilinear", "lanczos"], help="Interpolation method for SR")
+    p.add_argument("--sr-real-esrgan", action="store_true", default=False, help="Use Real-ESRGAN model (requires realesrgan package)")
     return p
 
 
@@ -108,6 +113,10 @@ def main(argv: Optional[list] = None) -> int:
         osm_extra_tags=osm_tags,
         yolo_weights=args.yolo_weights,
         fuse_mode=args.fuse_mode,
+        use_super_resolution=bool(args.use_sr),
+        sr_target_resolution_m=args.sr_target_res,
+        sr_method=args.sr_method,
+        sr_use_real_esrgan=bool(args.sr_real_esrgan),
     )
 
     outdir = Path(args.outdir)

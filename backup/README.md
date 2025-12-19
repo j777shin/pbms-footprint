@@ -189,6 +189,7 @@ python run_nearby.py \
   --coords coords.yaml \
   --weights weights/best_4ch.pt \
   --yolo-weights weights/yolo_buildings.pt \
+  --use-osm --osm-filter \
   --fuse-mode union \
   --outdir geo_outputs
 ```
