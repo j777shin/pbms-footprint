@@ -23,6 +23,7 @@ from .refine import refine_predictions_with_osm
 from .yolo import predict_yolov8_mask_on_rgb
 from .fuse import fuse_binary_masks, FuseMode
 from .super_resolution import apply_super_resolution_adaptive
+from .postprocess import postprocess_polygons, postprocess_mask
 
 
 @dataclass(frozen=True)
@@ -70,18 +71,27 @@ def predict_buildings_near_coordinate(
     yolo_iou: float = 0.7,
     yolo_classes: Optional[list] = None,
     fuse_mode: FuseMode = "intersection",
-    # Super Resolution
+    # Super Resolution (SRDR3)
     use_super_resolution: bool = False,
     sr_target_resolution_m: float = 2.5,  # Target resolution (e.g., 2.5m from 10m = 4x)
-    sr_method: str = "bicubic",  # "bicubic", "bilinear", "lanczos"
-    sr_use_real_esrgan: bool = False,  # Use Real-ESRGAN if available
+    sr_method: str = "srdr3",  # "srdr3" (default), "bicubic", "bilinear", "lanczos", "real_esrgan"
+    sr_model_path: Optional[str] = None,  # Optional path to SRDR3 model weights
+    sr_device: Optional[str] = None,  # Device for SRDR3 ("cuda", "cpu", or None for auto)
+    # Post-processing
+    enable_postprocessing: bool = True,  # Enable enhanced post-processing
+    postprocess_smooth: bool = True,  # Smooth polygon boundaries
+    postprocess_smooth_tolerance_m: float = 0.5,  # Smoothing tolerance
+    postprocess_remove_holes: bool = True,  # Remove small holes
+    postprocess_min_hole_area_m2: float = 5.0,  # Minimum hole area to keep
+    postprocess_regularize: bool = False,  # Regularize shapes (rectangularize)
+    postprocess_morphological: str = "closing",  # Mask post-processing: "closing", "opening", "both", "none"
     # Vectorization
     min_area_m2: float = 1.0,
 ) -> NearbyBuildingsResult:
     """
     End-to-end:
     lat/lon -> Sentinel-2 patch -> ReFineNet mask -> optional YOLO fusion ->
-    polygons -> clip to radius -> optional OSM intersection filter -> GeoJSON.
+    polygons -> post-processing -> clip to radius -> optional OSM intersection filter -> GeoJSON.
     """
     if not refinenet_weights_path:
         raise ValueError("refinenet_weights_path is required")
@@ -107,7 +117,8 @@ def predict_buildings_near_coordinate(
             target_resolution_m=sr_target_resolution_m,
             source_resolution_m=resolution_m,
             method=sr_method,
-            use_real_esrgan=sr_use_real_esrgan,
+            use_deep_model=True,
+            model_path=sr_model_path,
         )
         print(f"Super resolution applied. Enhanced resolution: {actual_resolution:.2f}m (scale: {resolution_m/actual_resolution:.1f}x)")
         # Update patch size for model input (it will be resized anyway, but this helps with OSM mask sizing)
@@ -162,6 +173,14 @@ def predict_buildings_near_coordinate(
         yolo_mask01 = ymask.mask01
         fused_mask01 = fuse_binary_masks(pred.mask, ymask.mask01, mode=fuse_mode)
 
+    # Apply post-processing to mask before vectorization
+    if enable_postprocessing and postprocess_morphological != "none":
+        fused_mask01 = postprocess_mask(
+            fused_mask01,
+            morphological=postprocess_morphological,
+            kernel_size=3,
+        )
+
     vect = mask_to_polygons_projected(
         fused_mask01,
         bbox_projected=s2.bbox_projected,
@@ -169,6 +188,20 @@ def predict_buildings_near_coordinate(
         min_area_m2=min_area_m2,
     )
     clipped = clip_polygons_to_radius_m(vect.polygons_projected, s2.center_projected, radius_m)
+
+    # Apply post-processing to polygons
+    if enable_postprocessing:
+        clipped = postprocess_polygons(
+            clipped,
+            smooth=postprocess_smooth,
+            smooth_tolerance_m=postprocess_smooth_tolerance_m,
+            remove_holes=postprocess_remove_holes,
+            min_hole_area_m2=postprocess_min_hole_area_m2,
+            regularize=postprocess_regularize,
+            regularize_method="min_area_rect",
+            min_area_m2=min_area_m2,
+            min_perimeter_m=3.0,
+        )
 
     osm_geojson = None
     if use_osm:
@@ -222,5 +255,4 @@ def predict_buildings_near_coordinate(
         geojson_predicted=geojson_pred,
         osm_geojson=osm_geojson,
     )
-
 

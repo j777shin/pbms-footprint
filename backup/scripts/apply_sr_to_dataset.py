@@ -16,8 +16,8 @@ def apply_sr_to_dataset(
     source_root: Path,
     target_root: Path,
     scale_factor: int = 4,
-    method: str = "bicubic",
-    use_real_esrgan: bool = False,
+    method: str = "srdr3",
+    model_path: Optional[str] = None,
     splits: Optional[list[str]] = None,
 ) -> None:
     import cv2
@@ -72,29 +72,22 @@ def apply_sr_to_dataset(
             # Convert BGR to RGB for super resolution
             img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
             
-            # Apply super resolution to image
-            if use_real_esrgan:
-                try:
-                    sr_img_rgb = apply_super_resolution(
-                        img_rgb,
-                        scale_factor=scale_factor,
-                        method=method,
-                        use_real_esrgan=True,
-                    )
-                except Exception as e:
-                    print(f"[{split}] Real-ESRGAN failed for {img_file.name}: {e}, falling back to {method}")
-                    sr_img_rgb = apply_super_resolution(
-                        img_rgb,
-                        scale_factor=scale_factor,
-                        method=method,
-                        use_real_esrgan=False,
-                    )
-            else:
+            # Apply super resolution using SRDR3
+            try:
                 sr_img_rgb = apply_super_resolution(
                     img_rgb,
                     scale_factor=scale_factor,
                     method=method,
-                    use_real_esrgan=False,
+                    use_deep_model=(method == "srdr3"),
+                    model_path=model_path,
+                )
+            except Exception as e:
+                print(f"[{split}] SRDR3 failed for {img_file.name}: {e}, falling back to bicubic")
+                sr_img_rgb = apply_super_resolution(
+                    img_rgb,
+                    scale_factor=scale_factor,
+                    method="bicubic",
+                    use_deep_model=False,
                 )
             
             # Convert back to BGR for saving
@@ -151,15 +144,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--method",
         type=str,
-        default="bicubic",
-        choices=["bicubic", "bilinear", "lanczos"],
-        help="Interpolation method (default: bicubic)",
+        default="srdr3",
+        choices=["srdr3", "bicubic", "bilinear", "lanczos", "real_esrgan"],
+        help="SR method: srdr3 (default deep model), or traditional methods",
     )
     p.add_argument(
-        "--use-real-esrgan",
-        action="store_true",
-        default=False,
-        help="Use Real-ESRGAN model (requires: pip install realesrgan)",
+        "--model-path",
+        type=str,
+        default=None,
+        help="Optional path to SRDR3 model weights file",
     )
     p.add_argument(
         "--splits",
@@ -186,7 +179,7 @@ def main(argv: Optional[list] = None) -> int:
         target_root=target_root,
         scale_factor=int(args.scale_factor),
         method=args.method,
-        use_real_esrgan=bool(args.use_real_esrgan),
+        model_path=args.model_path,
         splits=args.splits,
     )
     

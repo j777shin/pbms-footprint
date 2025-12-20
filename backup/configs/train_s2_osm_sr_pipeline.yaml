@@ -1,0 +1,33 @@
+Callbacks:
+  callers:
+  - TimeCallback
+  - TrainStateCallback
+  - TrainChkCallback
+  log_dir: logs
+Criterion:
+  dice_weights: 1.0
+  name: Dice
+Loader:
+  augmenters:
+  - horizontal_flip
+  - vertical_flip
+  - rotation: 15
+  batch_size: 4
+  image_normalizer: divide_by_255
+  label_normalizer: binary_label
+  root: data/s2_osm_sr/building_patches
+Metrics:
+- accuracy
+- precision
+- f1
+- recall
+- iou
+Model:
+  name: ReFineNet
+  param:
+    backbone: resnet50
+Optimizer:
+  name: AdamW
+  param:
+    lr: 0.0001
+Segmentation: binary

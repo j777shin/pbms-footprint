@@ -10,7 +10,6 @@ __pycache__/
 # local outputs
 geo_outputs/
 data/
-weights/
 yolo_runs/
 logs/   
 cache/

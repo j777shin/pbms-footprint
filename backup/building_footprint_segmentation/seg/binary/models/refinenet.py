@@ -183,7 +183,27 @@ class ReFineNet(nn.Module):
     ):
         super().__init__()
         self.num_classes = num_classes
-        res_net = getattr(models, res_net_to_use)(pretrained=pre_trained_image_net)
+        # Use new weights API if available, fallback to pretrained for older torchvision
+        if pre_trained_image_net:
+            try:
+                # Try new API first (torchvision >= 0.13)
+                if res_net_to_use == "resnet50":
+                    from torchvision.models import ResNet50_Weights
+                    res_net = getattr(models, res_net_to_use)(weights=ResNet50_Weights.IMAGENET1K_V1)
+                elif res_net_to_use == "resnet34":
+                    from torchvision.models import ResNet34_Weights
+                    res_net = getattr(models, res_net_to_use)(weights=ResNet34_Weights.IMAGENET1K_V1)
+                else:
+                    # Fallback to old API for other models
+                    res_net = getattr(models, res_net_to_use)(pretrained=True)
+            except (ImportError, AttributeError, TypeError):
+                # Fallback to old API for older torchvision versions
+                res_net = getattr(models, res_net_to_use)(pretrained=True)
+        else:
+            try:
+                res_net = getattr(models, res_net_to_use)(weights=None)
+            except (TypeError, AttributeError):
+                res_net = getattr(models, res_net_to_use)(pretrained=False)
 
         if not top_layers_trainable:
             for param in res_net.parameters():

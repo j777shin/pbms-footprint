@@ -141,11 +141,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--out-root", type=str, default="data/s2_osm/building_patches")
     
-    # Super resolution options
-    p.add_argument("--use-sr", action="store_true", default=False, help="Apply super resolution to images and labels")
+    # Super resolution options (SRDR3)
+    p.add_argument("--use-sr", action="store_true", default=False, help="Apply super resolution using SRDR3 to images and labels")
     p.add_argument("--sr-scale-factor", type=int, default=4, help="Super resolution scale factor (default: 4 = 10m -> 2.5m)")
-    p.add_argument("--sr-method", type=str, default="bicubic", choices=["bicubic", "bilinear", "lanczos"], help="SR interpolation method")
-    p.add_argument("--sr-real-esrgan", action="store_true", default=False, help="Use Real-ESRGAN for super resolution")
+    p.add_argument("--sr-method", type=str, default="srdr3", choices=["srdr3", "bicubic", "bilinear", "lanczos", "real_esrgan"], help="SR method: srdr3 (default), or traditional methods")
+    p.add_argument("--sr-model-path", type=str, default=None, help="Optional path to SRDR3 model weights")
     
     return p
 
@@ -218,7 +218,7 @@ def main(argv: Optional[list] = None) -> int:
                 time.sleep(float(args.sleep_s))
                 continue
 
-            # Apply super resolution if enabled
+            # Apply super resolution if enabled (using SRDR3)
             rgb_final = s2.rgb
             mask_final = mask01
             if args.use_sr:
@@ -231,7 +231,8 @@ def main(argv: Optional[list] = None) -> int:
                         s2.rgb,
                         scale_factor=int(args.sr_scale_factor),
                         method=args.sr_method,
-                        use_real_esrgan=bool(args.sr_real_esrgan),
+                        use_deep_model=(args.sr_method == "srdr3"),
+                        model_path=args.sr_model_path,
                     )
                     # Upscale mask using nearest neighbor
                     h, w = mask01.shape
