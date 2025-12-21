@@ -105,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--center-lon", type=float, required=True)
     p.add_argument("--sample-radius-m", type=float, default=3000.0, help="Sample points within this radius of center.")
 
-    p.add_argument("--patch-px", type=int, default=384)
+    p.add_argument("--patch-px", type=int, default=256, help="Patch size in pixels (default: 256). For 10x SR, use 256 or smaller to reduce memory usage.")
     p.add_argument("--resolution-m", type=float, default=10.0)
     p.add_argument("--time-start", type=str, default="2025-06-01")
     p.add_argument("--time-end", type=str, default="2025-10-01")
@@ -213,7 +213,29 @@ def main(argv: Optional[list] = None) -> int:
                 time.sleep(float(args.sleep_s))
                 continue
 
-            mask01 = _rasterize_osm_buildings(osm.geoms_projected, s2.bbox_projected, out_size=int(args.patch_px))
+            # Filter to only the building at the exact coordinate
+            from building_footprint_segmentation.geo.osm import find_building_at_coordinate
+            target_building = find_building_at_coordinate(
+                lat=lat,
+                lon=lon,
+                buildings_projected=osm.geoms_projected,
+                center_projected=s2.center_projected,
+                max_distance_m=50.0,  # 50m max distance
+            )
+            
+            if target_building is None:
+                if args.skip_empty:
+                    print(f"[{split}] No building found at coordinate ({lat:.6f}, {lon:.6f}), skipping...")
+                    time.sleep(float(args.sleep_s))
+                    continue
+                # If not skipping empty, use all buildings
+                buildings_to_rasterize = osm.geoms_projected
+            else:
+                # Only use the building at the coordinate
+                buildings_to_rasterize = [target_building]
+                print(f"[{split}] Using building at coordinate ({lat:.6f}, {lon:.6f})")
+            
+            mask01 = _rasterize_osm_buildings(buildings_to_rasterize, s2.bbox_projected, out_size=int(args.patch_px))
             if args.skip_empty and mask01.sum() == 0:
                 time.sleep(float(args.sleep_s))
                 continue
@@ -225,26 +247,50 @@ def main(argv: Optional[list] = None) -> int:
                 from building_footprint_segmentation.geo.super_resolution import apply_super_resolution
                 import cv2
                 import numpy as np
+                import gc
                 
                 try:
+                    # For large scale factors, use CPU to avoid OOM
+                    scale_factor = int(args.sr_scale_factor)
+                    use_cpu_for_large = scale_factor >= 8
+                    
+                    print(f"[{split}] Applying {scale_factor}x super resolution...")
                     rgb_final = apply_super_resolution(
                         s2.rgb,
-                        scale_factor=int(args.sr_scale_factor),
+                        scale_factor=scale_factor,
                         method=args.sr_method,
                         use_deep_model=(args.sr_method == "srdr3"),
                         model_path=args.sr_model_path,
+                        device="cpu" if use_cpu_for_large else None,  # Use CPU for large scale factors
                     )
+                    
                     # Upscale mask using nearest neighbor
                     h, w = mask01.shape
                     mask_final = cv2.resize(
                         mask01.astype(np.uint8),
-                        (w * int(args.sr_scale_factor), h * int(args.sr_scale_factor)),
+                        (w * scale_factor, h * scale_factor),
                         interpolation=cv2.INTER_NEAREST
                     ).astype(np.uint8)
+                    
+                    # Force garbage collection to free memory
+                    gc.collect()
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    
+                    print(f"[{split}] Super resolution complete: {s2.rgb.shape} -> {rgb_final.shape}")
+                    
+                except MemoryError as e:
+                    print(f"[{split}] Out of memory during super resolution: {e}")
+                    print(f"[{split}] Falling back to original resolution")
+                    rgb_final = s2.rgb
+                    mask_final = mask01
+                    gc.collect()
                 except Exception as e:
                     print(f"[{split}] Super resolution failed: {e}, using original resolution")
                     rgb_final = s2.rgb
                     mask_final = mask01
+                    gc.collect()
 
             name = f"s2_{split}_{counters[split]:06d}"
             out_img = out_root / split / "images" / f"{name}.png"

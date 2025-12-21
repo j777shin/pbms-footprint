@@ -12,7 +12,7 @@ Loader:
   - horizontal_flip
   - vertical_flip
   - rotation: 15
-  batch_size: 4
+  batch_size: 1
   image_normalizer: divide_by_255
   label_normalizer: binary_label
   root: data/s2_osm_sr/building_patches

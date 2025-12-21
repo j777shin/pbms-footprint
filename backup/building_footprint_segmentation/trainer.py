@@ -226,6 +226,11 @@ class Trainer:
             self.metrics.get_metrics(
                 ground_truth=train_data["ground_truth"], prediction=prediction
             )
+            
+            # Memory management: clear cache after each batch for large images
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            del prediction, calculated_loss
 
         return mean_loss.item(), self.metrics.compute_mean(), step, progress_bar
 
@@ -254,6 +259,10 @@ class Trainer:
                 ground_truth=val_data["ground_truth"], prediction=prediction
             )
             
+            # Memory management: clear cache after each validation batch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            del prediction, loss
 
         return np.mean(losses), self.metrics.compute_mean()
 

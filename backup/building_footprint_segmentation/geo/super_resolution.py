@@ -183,13 +183,20 @@ def apply_super_resolution(
             img_float = rgb_uint8.astype(np.float32) / 255.0
             img_tensor = torch.from_numpy(img_float).permute(2, 0, 1).unsqueeze(0).to(device)
             
-            # Apply super resolution
+            # Apply super resolution with memory management
             with torch.no_grad():
                 sr_tensor = model(img_tensor)
                 sr_tensor = torch.clamp(sr_tensor, 0, 1)
             
-            # Convert back to numpy
+            # Convert back to numpy and free GPU memory immediately
             sr_array = sr_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
+            
+            # Clear GPU cache to free memory
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            # Delete tensors to free memory
+            del sr_tensor, img_tensor
             
             # Handle remainder scaling if needed (e.g., for 10x = 8x + 1.25x)
             h, w = rgb_uint8.shape[:2]

@@ -81,16 +81,51 @@ def reproject_geoms_to_wgs84(
 def geoms_to_geojson_feature_collection(
     geoms_wgs84: List["object"],
     properties: Optional[dict] = None,
+    polygon_areas: Optional[List[float]] = None,  # Areas in square meters (from projected CRS)
 ) -> dict:
     from shapely.geometry import mapping
 
     props = properties or {}
+    
+    # Add OSM-compatible properties
+    osm_props = {
+        "building": "yes",  # OSM standard building tag
+        "source": props.get("source", "model"),  # Keep original source
+    }
+    osm_props.update(props)  # Allow override
+    
+    features = []
+    for i, g in enumerate(geoms_wgs84):
+        # Use provided area if available (more accurate, from projected CRS)
+        # Otherwise calculate approximate area from WGS84
+        if polygon_areas is not None and i < len(polygon_areas):
+            area_m2 = polygon_areas[i]
+        else:
+            # Approximate area calculation (less accurate in WGS84)
+            # This is a rough estimate - proper calculation needs projected CRS
+            area_m2 = g.area * 111000 * 111000  # Rough conversion (degrees to meters)
+        
+        feature_props = {
+            **osm_props,
+            "id": i + 1,
+            "area_m2": round(area_m2, 2),
+        }
+        
+        features.append({
+            "type": "Feature",
+            "properties": feature_props,
+            "geometry": mapping(g)
+        })
+    
     return {
         "type": "FeatureCollection",
-        "features": [
-            {"type": "Feature", "properties": dict(props), "geometry": mapping(g)}
-            for g in geoms_wgs84
-        ],
+        "crs": {
+            "type": "name",
+            "properties": {
+                "name": "urn:ogc:def:crs:OGC:1.3:CRS84"  # WGS84 (lon/lat order) - QGIS/OSM compatible
+            }
+        },
+        "features": features,
     }
 
 

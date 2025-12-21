@@ -43,6 +43,9 @@ class BaseLoader(Dataset):
         augmenters: Compose,
         batch_size: int,
     ):
+        # Disable pin_memory for large images (batch_size <= 2) to reduce memory usage
+        use_pin_memory = torch.cuda.is_available() and batch_size > 2
+        
         train_data = DataLoader(
             dataset=cls(
                 root_folder,
@@ -54,7 +57,7 @@ class BaseLoader(Dataset):
             shuffle=True,
             num_workers=0,
             batch_size=batch_size,
-            pin_memory=torch.cuda.is_available(),
+            pin_memory=use_pin_memory,
         )
         val_data = DataLoader(
             dataset=cls(
@@ -63,7 +66,7 @@ class BaseLoader(Dataset):
             shuffle=True,
             num_workers=0,
             batch_size=batch_size,
-            pin_memory=torch.cuda.is_available(),
+            pin_memory=use_pin_memory,
         )
 
         test_data = DataLoader(
@@ -73,7 +76,7 @@ class BaseLoader(Dataset):
             shuffle=True,
             num_workers=0,
             batch_size=batch_size,
-            pin_memory=torch.cuda.is_available(),
+            pin_memory=use_pin_memory,
         )
         return Loader(train_data, val_data, test_data)
 

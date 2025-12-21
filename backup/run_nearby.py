@@ -242,17 +242,37 @@ def main(argv: Optional[list] = None) -> int:
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
+    # Always save satellite imagery (should always be available)
+    print(f"Saving satellite imagery: shape={res.rgb_patch.shape}, dtype={res.rgb_patch.dtype}, min={res.rgb_patch.min()}, max={res.rgb_patch.max()}")
+    
+    # Save the main RGB (SR-enhanced if SR was applied, otherwise original)
     save_rgb_png(outdir / "s2_rgb.png", res.rgb_patch)
+    
+    # If SR was applied, also save the original before SR
+    if res.rgb_patch_original is not None:
+        print(f"Saving original satellite imagery (before SR): shape={res.rgb_patch_original.shape}")
+        save_rgb_png(outdir / "s2_rgb_original.png", res.rgb_patch_original)
+        # Also save the SR-enhanced version with a clear name
+        save_rgb_png(outdir / "s2_rgb_sr.png", res.rgb_patch)
+    
+    # Save masks
     save_mask_png(outdir / "mask_refinenet.png", res.refinenet.mask)
     if res.yolo_mask01 is not None:
         save_mask_png(outdir / "mask_yolo.png", res.yolo_mask01)
     save_mask_png(outdir / "mask_fused.png", res.fused_mask01)
     
-    # Create overlay with predictions
+    # Create overlay with predictions (satellite imagery + predictions)
+    print(f"Creating overlay: RGB shape={res.rgb_patch.shape}, mask shape={res.fused_mask01.shape}")
     save_overlay_png(outdir / "overlay_fused.png", res.rgb_patch, res.fused_mask01)
     
     # Create overlay with OSM buildings if available
-    if res.osm_geojson is not None and len(res.osm_geojson.get("features", [])) > 0:
+    # Use all OSM buildings for visualization (not just the filtered one)
+    osm_geoms_projected = None
+    if hasattr(res, 'osm_all_buildings_projected') and res.osm_all_buildings_projected is not None:
+        # Use the unfiltered OSM buildings from the pipeline
+        osm_geoms_projected = res.osm_all_buildings_projected
+    elif res.osm_geojson is not None and len(res.osm_geojson.get("features", [])) > 0:
+        # Fallback: extract from GeoJSON if not available directly
         try:
             from building_footprint_segmentation.geo.osm import rasterize_osm_buildings_to_mask
             from pyproj import Transformer
@@ -277,8 +297,17 @@ def main(argv: Optional[list] = None) -> int:
                 except Exception as e:
                     print(f"Warning: Failed to transform OSM geometry: {e}")
                     continue
+        except Exception as e:
+            print(f"Warning: Failed to extract OSM geometries: {e}")
+            osm_geoms_projected = None
+    
+    if osm_geoms_projected:
+        try:
+            from building_footprint_segmentation.geo.osm import rasterize_osm_buildings_to_mask
+            import cv2
+            import numpy as np
             
-            if osm_geoms_projected:
+            if len(osm_geoms_projected) > 0:
                 # Rasterize OSM buildings to match RGB patch size
                 h, w = res.rgb_patch.shape[:2]
                 osm_mask01 = rasterize_osm_buildings_to_mask(
@@ -305,19 +334,44 @@ def main(argv: Optional[list] = None) -> int:
                     pred_alpha=0.4,
                     osm_alpha=0.3
                 )
+            else:
+                print("Warning: No OSM buildings to rasterize")
         except Exception as e:
             print(f"Warning: Failed to create OSM overlay: {e}")
             import traceback
             traceback.print_exc()
+    else:
+        # No OSM data available, but still show satellite imagery with predictions
+        print("Note: No OSM data available for overlay")
 
+    # Save predicted building footprints as GeoJSON (polygons)
     with open(outdir / "predicted_buildings.geojson", "w") as f:
         json.dump(res.geojson_predicted, f, indent=2)
+    
+    num_predicted = len(res.geojson_predicted.get("features", []))
+    if num_predicted > 0:
+        print(f"\n✓ Saved {num_predicted} building footprint polygon(s) to predicted_buildings.geojson")
+        # Print polygon details
+        for i, feature in enumerate(res.geojson_predicted.get("features", [])):
+            geom_type = feature.get("geometry", {}).get("type", "unknown")
+            coords = feature.get("geometry", {}).get("coordinates", [])
+            if geom_type == "Polygon" and coords:
+                num_vertices = len(coords[0]) if coords else 0
+                print(f"  Polygon {i+1}: {geom_type} with {num_vertices} vertices")
+            elif geom_type == "MultiPolygon":
+                num_polygons = len(coords)
+                print(f"  Polygon {i+1}: {geom_type} with {num_polygons} parts")
+    else:
+        print(f"\n⚠ No building footprints detected at coordinate ({lat:.6f}, {lon:.6f})")
+        print(f"  This may mean:")
+        print(f"  - No building exists at this location")
+        print(f"  - Building is outside the 50m search radius")
+        print(f"  - Detection threshold may be too high")
+    
     if res.osm_geojson is not None:
         with open(outdir / "osm_buildings.geojson", "w") as f:
             json.dump(res.osm_geojson, f, indent=2)
     
-    # Print summary
-    num_predicted = len(res.geojson_predicted.get("features", []))
     num_osm = len(res.osm_geojson.get("features", [])) if res.osm_geojson else 0
     
     print(f"\n{'='*60}")
@@ -338,7 +392,12 @@ def main(argv: Optional[list] = None) -> int:
     if res.osm_geojson and (outdir / "overlay_with_osm.png").exists():
         print(f"  - mask_osm.png: OSM building mask")
         print(f"  - overlay_with_osm.png: Overlay with predictions (red) and OSM (green)")
-    print(f"  - predicted_buildings.geojson: Building footprints")
+    print(f"  - predicted_buildings.geojson: Building footprint polygons (GeoJSON format)")
+    if num_predicted > 0:
+        print(f"    → Contains {num_predicted} polygon feature(s) in WGS84 (lat/lon) coordinates")
+        print(f"    → QGIS compatible: Yes (drag & drop into QGIS)")
+        print(f"    → OSM compatible: Yes (includes building=yes tag)")
+        print(f"    → Properties: building, source, area_m2, id")
     if res.osm_geojson:
         print(f"  - osm_buildings.geojson: OSM reference buildings")
     print(f"{'='*60}")

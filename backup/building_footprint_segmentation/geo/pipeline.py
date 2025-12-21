@@ -28,7 +28,8 @@ from .postprocess import postprocess_polygons, postprocess_mask
 
 @dataclass(frozen=True)
 class NearbyBuildingsResult:
-    rgb_patch: np.ndarray  # HxWx3 uint8 RGB
+    rgb_patch: np.ndarray  # HxWx3 uint8 RGB (SR-enhanced if SR was applied, otherwise original)
+    rgb_patch_original: Optional[np.ndarray]  # HxWx3 uint8 RGB (original, before SR, None if SR not applied)
     projected_epsg: int
     bbox_projected: Tuple[float, float, float, float]
     center_projected: Tuple[float, float]
@@ -41,6 +42,7 @@ class NearbyBuildingsResult:
     geojson_predicted: dict
 
     osm_geojson: Optional[dict]
+    osm_all_buildings_projected: Optional[list] = None  # All OSM buildings for visualization
 
 
 def predict_buildings_near_coordinate(
@@ -110,6 +112,7 @@ def predict_buildings_near_coordinate(
     # Apply super resolution if enabled
     actual_resolution = resolution_m
     rgb_for_prediction = s2.rgb
+    rgb_original = s2.rgb.copy()  # Keep original for saving (before SR)
     if use_super_resolution:
         print(f"Applying super resolution: {resolution_m}m -> {sr_target_resolution_m}m target...")
         rgb_for_prediction, actual_resolution = apply_super_resolution_adaptive(
@@ -125,6 +128,7 @@ def predict_buildings_near_coordinate(
         enhanced_patch_px = rgb_for_prediction.shape[0]
     else:
         enhanced_patch_px = patch_px
+        rgb_original = None  # No need to save separately if no SR was applied
 
     model = load_refinenet(refinenet_weights_path)
     
@@ -188,6 +192,16 @@ def predict_buildings_near_coordinate(
         min_area_m2=min_area_m2,
     )
     clipped = clip_polygons_to_radius_m(vect.polygons_projected, s2.center_projected, radius_m)
+    
+    # Filter to only the building at the exact coordinate
+    from .osm import filter_to_building_at_coordinate
+    clipped = filter_to_building_at_coordinate(
+        lat=lat,
+        lon=lon,
+        polygons_projected=clipped,
+        center_projected=s2.center_projected,
+        max_distance_m=50.0,  # 50m max distance from coordinate
+    )
 
     # Apply post-processing to polygons
     if enable_postprocessing:
@@ -204,6 +218,7 @@ def predict_buildings_near_coordinate(
         )
 
     osm_geojson = None
+    osm_all_buildings = None  # Keep all OSM buildings for visualization
     if use_osm:
         # Reuse OSM data if already fetched for 4-channel model
         osm = osm_early if osm_early is not None else fetch_osm_buildings_within_radius(
@@ -213,8 +228,16 @@ def predict_buildings_near_coordinate(
             projected_epsg=s2.projected_epsg,
             extra_tags=osm_extra_tags,
         )
+        # Keep all OSM buildings for visualization (not filtered to coordinate)
+        osm_all_buildings = osm.geoms_projected
+        # Calculate OSM building areas in projected CRS (meters)
+        osm_areas = [g.area for g in osm.geoms_projected]
         osm_wgs84 = reproject_geoms_to_wgs84(osm.geoms_projected, from_epsg=osm.projected_epsg)
-        osm_geojson = geoms_to_geojson_feature_collection(osm_wgs84, properties={"source": "osm"})
+        osm_geojson = geoms_to_geojson_feature_collection(
+            osm_wgs84, 
+            properties={"source": "osm", "building": "yes"},
+            polygon_areas=osm_areas,
+        )
 
         if osm_prefer_direct:
             # Use OSM footprints directly (most accurate option)
@@ -237,14 +260,25 @@ def predict_buildings_near_coordinate(
                 osm_buildings_projected=osm.geoms_projected,
             )
 
+    # Calculate areas in projected CRS (meters) before reprojecting to WGS84
+    # This gives accurate area measurements in square meters
+    polygon_areas = [g.area for g in clipped]  # Area in square meters (projected CRS)
+    
     pred_wgs84 = reproject_geoms_to_wgs84(clipped, from_epsg=s2.projected_epsg)
-    geojson_pred = geoms_to_geojson_feature_collection(pred_wgs84, properties={"source": "model"})
+    
+    # Create GeoJSON with accurate area measurements
+    geojson_pred = geoms_to_geojson_feature_collection(
+        pred_wgs84, 
+        properties={"source": "model"},
+        polygon_areas=polygon_areas,  # Pass areas for accurate calculation
+    )
 
     # Use enhanced RGB if super resolution was applied, otherwise original
     output_rgb = rgb_for_prediction if use_super_resolution else s2.rgb
     
     return NearbyBuildingsResult(
         rgb_patch=output_rgb,
+        rgb_patch_original=rgb_original,  # Original before SR (None if SR not applied)
         projected_epsg=s2.projected_epsg,
         bbox_projected=s2.bbox_projected,
         center_projected=s2.center_projected,
@@ -254,5 +288,6 @@ def predict_buildings_near_coordinate(
         predicted_polygons_wgs84=pred_wgs84,
         geojson_predicted=geojson_pred,
         osm_geojson=osm_geojson,
+        osm_all_buildings_projected=osm_all_buildings,
     )
 

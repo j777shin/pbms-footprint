@@ -140,3 +140,86 @@ def prefer_osm_footprints(
     )
 
 
+def find_building_at_coordinate(
+    *,
+    lat: float,
+    lon: float,
+    buildings_projected: List["object"],
+    center_projected: Tuple[float, float],
+    max_distance_m: float = 50.0,
+) -> Optional["object"]:
+    """
+    Find the building closest to the specified coordinate.
+    
+    Args:
+        lat: Latitude in WGS84
+        lon: Longitude in WGS84
+        buildings_projected: List of building geometries in projected CRS
+        center_projected: Center point (x, y) in projected CRS (should correspond to lat/lon)
+        max_distance_m: Maximum distance in meters to consider (default: 50m)
+        
+    Returns:
+        The building geometry closest to the coordinate, or None if none found within max_distance_m
+    """
+    from shapely.geometry import Point
+    
+    if not buildings_projected:
+        return None
+    
+    # Create a point at the coordinate in projected CRS
+    # The center_projected should already be the projected version of lat/lon
+    target_point = Point(center_projected[0], center_projected[1])
+    
+    # Find the closest building
+    closest_building = None
+    min_distance = float('inf')
+    
+    for building in buildings_projected:
+        # Calculate distance from building to target point
+        distance = building.distance(target_point)
+        
+        # For polygons, check if point is inside (distance = 0)
+        if building.contains(target_point):
+            return building
+        
+        if distance < min_distance and distance <= max_distance_m:
+            min_distance = distance
+            closest_building = building
+    
+    return closest_building
+
+
+def filter_to_building_at_coordinate(
+    *,
+    lat: float,
+    lon: float,
+    polygons_projected: List["object"],
+    center_projected: Tuple[float, float],
+    max_distance_m: float = 50.0,
+) -> List["object"]:
+    """
+    Filter polygons to only include the one closest to the specified coordinate.
+    
+    Args:
+        lat: Latitude in WGS84
+        lon: Longitude in WGS84
+        polygons_projected: List of polygon geometries in projected CRS
+        center_projected: Center point (x, y) in projected CRS
+        max_distance_m: Maximum distance in meters to consider
+        
+    Returns:
+        List containing only the polygon closest to the coordinate (or empty list if none found)
+    """
+    closest = find_building_at_coordinate(
+        lat=lat,
+        lon=lon,
+        buildings_projected=polygons_projected,
+        center_projected=center_projected,
+        max_distance_m=max_distance_m,
+    )
+    
+    if closest is not None:
+        return [closest]
+    return []
+
+

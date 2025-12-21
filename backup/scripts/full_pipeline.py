@@ -56,14 +56,15 @@ def main():
     parser.add_argument("--n-train", type=int, default=200, help="Number of training samples")
     parser.add_argument("--n-val", type=int, default=40, help="Number of validation samples")
     parser.add_argument("--n-test", type=int, default=40, help="Number of test samples")
-    parser.add_argument("--sample-radius-m", type=float, default=300, help="Sampling radius in meters")
+    parser.add_argument("--sample-radius-m", type=float, default=30, help="Sampling radius in meters")
+    parser.add_argument("--patch-px", type=int, default=256, help="Patch size in pixels (default: 256). For 10x SR, use 256 or smaller to reduce memory.")
     parser.add_argument("--sr-scale-factor", type=int, default=10, help="Super resolution scale factor (10 = 10m->1m target)")
     parser.add_argument("--sr-method", type=str, default="srdr3", help="SR method (srdr3, bicubic, etc.)")
     parser.add_argument("--sr-model-path", type=str, default=None, help="Path to SRDR3 model weights")
     
     # Training parameters
     parser.add_argument("--refinenet-epochs", type=int, default=10, help="ReFineNet training epochs")
-    parser.add_argument("--refinenet-batch-size", type=int, default=4, help="ReFineNet batch size")
+    parser.add_argument("--refinenet-batch-size", type=int, default=1, help="ReFineNet batch size (default: 1 for large SR images to avoid OOM)")
     parser.add_argument("--yolo-epochs", type=int, default=10, help="YOLO training epochs")
     parser.add_argument("--yolo-batch", type=int, default=4, help="YOLO batch size")
     parser.add_argument("--yolo-imgsz", type=int, default=3840, help="YOLO image size (for 10x SR: 384*10=3840)")
@@ -134,6 +135,7 @@ def main():
             "--n-train", str(args.n_train),
             "--n-val", str(args.n_val),
             "--n-test", str(args.n_test),
+            "--patch-px", str(args.patch_px),
             "--out-root", str(s2_osm_root),
             "--use-sr",
             "--sr-scale-factor", str(args.sr_scale_factor),
