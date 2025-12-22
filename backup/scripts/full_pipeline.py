@@ -47,15 +47,15 @@ def read_coords(coords_file: Path) -> Dict[str, Any]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Full pipeline: Sentinel-2 -> SR -> Dataset -> Training -> Inference (3-channel only)"
+        description="Full pipeline: Google Maps -> SR -> Dataset -> Training -> Inference (3-channel only)"
     )
     parser.add_argument("--coords", type=str, default="coords.yaml", help="Coordinates YAML file")
-    parser.add_argument("--dotenv", type=str, default=".env", help=".env file with Sentinel Hub credentials")
+    parser.add_argument("--dotenv", type=str, default=".env", help=".env file with Google Maps API key (GOOGLE_MAPS_API_KEY)")
     
     # Dataset parameters
-    parser.add_argument("--n-train", type=int, default=200, help="Number of training samples")
-    parser.add_argument("--n-val", type=int, default=40, help="Number of validation samples")
-    parser.add_argument("--n-test", type=int, default=40, help="Number of test samples")
+    parser.add_argument("--n-train", type=int, default=10, help="Number of training samples")
+    parser.add_argument("--n-val", type=int, default=3, help="Number of validation samples")
+    parser.add_argument("--n-test", type=int, default=3, help="Number of test samples")
     parser.add_argument("--sample-radius-m", type=float, default=30, help="Sampling radius in meters")
     parser.add_argument("--patch-px", type=int, default=256, help="Patch size in pixels (default: 256). For 10x SR, use 256 or smaller to reduce memory.")
     parser.add_argument("--sr-scale-factor", type=int, default=10, help="Super resolution scale factor (10 = 10m->1m target)")
@@ -120,11 +120,11 @@ def main():
     logs_dir.mkdir(parents=True, exist_ok=True)
     
     # ============================================================================
-    # STEP 1: Create 3-channel dataset (s2_osm_sr)
+    # STEP 1: Create 3-channel dataset (googlemaps_osm_sr)
     # ============================================================================
     if not args.skip_dataset_creation:
         print(f"\n{'='*80}")
-        print("STEP 1: Creating 3-channel dataset with super resolution")
+        print("STEP 1: Creating 3-channel dataset with Google Maps + super resolution")
         print(f"{'='*80}")
         
         cmd = [
@@ -136,6 +136,7 @@ def main():
             "--n-val", str(args.n_val),
             "--n-test", str(args.n_test),
             "--patch-px", str(args.patch_px),
+            "--resolution-m", "0.5",  # Google Maps default resolution
             "--out-root", str(s2_osm_root),
             "--use-sr",
             "--sr-scale-factor", str(args.sr_scale_factor),
@@ -147,7 +148,7 @@ def main():
         if dotenv_file.exists():
             cmd.extend(["--dotenv", str(dotenv_file)])
         
-        run_command(cmd, "Creating 3-channel dataset (s2_osm_sr)")
+        run_command(cmd, "Creating 3-channel dataset with Google Maps (googlemaps_osm_sr)")
     else:
         print(f"\nSkipping dataset creation (using existing dataset)")
     
@@ -166,71 +167,7 @@ def main():
         ]
         
         run_command(cmd, "Converting to YOLO format (3-channel)")
-    
-    
-    # ============================================================================
-    # STEP 3: Train ReFineNet on 3-channel dataset
-    # ============================================================================
-    if not args.skip_training and not args.use_existing_weights:
-        print(f"\n{'='*80}")
-        print("STEP 3: Training ReFineNet on 3-channel dataset")
-        print(f"{'='*80}")
-        
-        # Create config for 3-channel SR dataset
-        config_3ch = {
-            "Segmentation": "binary",
-            "Model": {
-                "name": "ReFineNet",
-                "param": {
-                    "backbone": "resnet50"
-                }
-            },
-            "Criterion": {
-                "name": "Dice",
-                "dice_weights": 1.0
-            },
-            "Loader": {
-                "root": str(s2_osm_root),
-                "image_normalizer": "divide_by_255",
-                "label_normalizer": "binary_label",
-                "augmenters": [
-                    "horizontal_flip",
-                    "vertical_flip",
-                    {"rotation": 15}
-                ],
-                "batch_size": args.refinenet_batch_size
-            },
-            "Metrics": ["accuracy", "precision", "f1", "recall", "iou"],
-            "Optimizer": {
-                "name": "AdamW",
-                "param": {
-                    "lr": 1e-4
-                }
-            },
-            "Callbacks": {
-                "log_dir": str(logs_dir),
-                "callers": ["TimeCallback", "TrainStateCallback", "TrainChkCallback"]
-            }
-        }
-        
-        config_path_3ch = repo_root / "configs" / "train_s2_osm_sr_pipeline.yaml"
-        config_path_3ch.parent.mkdir(parents=True, exist_ok=True)
-        with open(config_path_3ch, 'w') as f:
-            yaml.dump(config_3ch, f, default_flow_style=False)
-        
-        cmd = [
-            sys.executable, "train_refinenet.py",
-            "--config", str(config_path_3ch),
-            "--epochs", str(args.refinenet_epochs),
-            "--batch-size", str(args.refinenet_batch_size),
-            "--log-root", str(logs_dir),
-            "--export-dir", str(weights_dir),
-            "--export-name", "best_sr_3ch.pt",
-        ]
-        
-        run_command(cmd, "Training ReFineNet (3-channel)")
-    
-    
+
     # ============================================================================
     # STEP 4: Train YOLO on 3-channel dataset
     # ============================================================================
@@ -277,6 +214,7 @@ def main():
             sys.executable, "run_nearby.py",
             "--coords", str(coords_file),
             "--weights", str(refinenet_weights_3ch),
+            "--fuse-mode", "yolo_only",
             "--outdir", str(output_3ch),
         ]
         

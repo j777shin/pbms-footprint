@@ -98,18 +98,17 @@ def _save_pair(out_img: Path, out_lbl: Path, rgb_uint8, mask01) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Create a weakly-labeled dataset from Sentinel-2 (Sentinel Hub) + OSM buildings.")
-    p.add_argument("--dotenv", type=str, default=".env", help="Optional .env path for Sentinel Hub credentials.")
+    p = argparse.ArgumentParser(description="Create a weakly-labeled dataset from Google Maps satellite imagery + OSM buildings.")
+    p.add_argument("--dotenv", type=str, default=".env", help="Optional .env path for Google Maps API key (GOOGLE_MAPS_API_KEY).")
 
     p.add_argument("--center-lat", type=float, required=True)
     p.add_argument("--center-lon", type=float, required=True)
     p.add_argument("--sample-radius-m", type=float, default=3000.0, help="Sample points within this radius of center.")
 
     p.add_argument("--patch-px", type=int, default=256, help="Patch size in pixels (default: 256). For 10x SR, use 256 or smaller to reduce memory usage.")
-    p.add_argument("--resolution-m", type=float, default=10.0)
-    p.add_argument("--time-start", type=str, default="2025-06-01")
-    p.add_argument("--time-end", type=str, default="2025-10-01")
-    p.add_argument("--mosaicking-order", type=str, default="leastCC", choices=["leastCC", "mostRecent"])
+    p.add_argument("--resolution-m", type=float, default=0.5, help="Desired resolution in meters per pixel (default: 0.5m for Google Maps)")
+    p.add_argument("--googlemaps-api-key", type=str, default=None, help="Google Maps API key (or set GOOGLE_MAPS_API_KEY env var)")
+    p.add_argument("--googlemaps-zoom", type=int, default=None, help="Google Maps zoom level (auto-calculated from resolution-m if not provided)")
 
     p.add_argument("--n-train", type=int, default=200)
     p.add_argument("--n-val", type=int, default=40)
@@ -157,7 +156,7 @@ def main(argv: Optional[list] = None) -> int:
 
     load_dotenv(Path(args.dotenv))
 
-    from building_footprint_segmentation.geo.sentinel2 import fetch_sentinel2_rgb_patch_sentinelhub
+    from building_footprint_segmentation.geo.googlemaps import fetch_googlemaps_satellite_patch
     from building_footprint_segmentation.geo.osm import fetch_osm_buildings_within_radius
 
     out_root = Path(args.out_root)
@@ -174,7 +173,7 @@ def main(argv: Optional[list] = None) -> int:
     for split, _ in splits:
         img_dir = out_root / split / "images"
         if img_dir.exists():
-            counters[split] = len(list(img_dir.glob(f"s2_{split}_*.png")))
+            counters[split] = len(list(img_dir.glob(f"gm_{split}_*.png")))
     idx = 0
 
     for split, n_needed in splits:
@@ -182,21 +181,26 @@ def main(argv: Optional[list] = None) -> int:
             idx += 1
             lat, lon = _sample_point_in_circle(args.center_lat, args.center_lon, float(args.sample_radius_m))
 
-            s2 = fetch_sentinel2_rgb_patch_sentinelhub(
-                lat=lat,
-                lon=lon,
-                patch_px=int(args.patch_px),
-                resolution_m=float(args.resolution_m),
-                time_interval=(args.time_start, args.time_end),
-                mosaicking_order=args.mosaicking_order,
-            )
+            try:
+                googlemaps = fetch_googlemaps_satellite_patch(
+                    lat=lat,
+                    lon=lon,
+                    patch_px=int(args.patch_px),
+                    resolution_m=float(args.resolution_m),
+                    api_key=args.googlemaps_api_key,
+                    zoom=args.googlemaps_zoom,
+                )
+            except Exception as e:
+                print(f"[{split}] Google Maps fetch error (skipping sample): {e}")
+                time.sleep(float(args.sleep_s))
+                continue
 
             try:
                 osm = fetch_osm_buildings_within_radius(
                     lat=lat,
                     lon=lon,
                     radius_m=osm_query_radius_m,
-                    projected_epsg=s2.projected_epsg,
+                    projected_epsg=googlemaps.projected_epsg,
                     overpass_url=args.overpass_url,
                     requests_timeout=int(args.overpass_timeout_s),
                     max_retries=int(args.overpass_retries),
@@ -219,7 +223,7 @@ def main(argv: Optional[list] = None) -> int:
                 lat=lat,
                 lon=lon,
                 buildings_projected=osm.geoms_projected,
-                center_projected=s2.center_projected,
+                center_projected=googlemaps.center_projected,
                 max_distance_m=50.0,  # 50m max distance
             )
             
@@ -235,13 +239,13 @@ def main(argv: Optional[list] = None) -> int:
                 buildings_to_rasterize = [target_building]
                 print(f"[{split}] Using building at coordinate ({lat:.6f}, {lon:.6f})")
             
-            mask01 = _rasterize_osm_buildings(buildings_to_rasterize, s2.bbox_projected, out_size=int(args.patch_px))
+            mask01 = _rasterize_osm_buildings(buildings_to_rasterize, googlemaps.bbox_projected, out_size=int(args.patch_px))
             if args.skip_empty and mask01.sum() == 0:
                 time.sleep(float(args.sleep_s))
                 continue
 
             # Apply super resolution if enabled (using SRDR3)
-            rgb_final = s2.rgb
+            rgb_final = googlemaps.rgb
             mask_final = mask01
             if args.use_sr:
                 from building_footprint_segmentation.geo.super_resolution import apply_super_resolution
@@ -256,7 +260,7 @@ def main(argv: Optional[list] = None) -> int:
                     
                     print(f"[{split}] Applying {scale_factor}x super resolution...")
                     rgb_final = apply_super_resolution(
-                        s2.rgb,
+                        googlemaps.rgb,
                         scale_factor=scale_factor,
                         method=args.sr_method,
                         use_deep_model=(args.sr_method == "srdr3"),
@@ -278,21 +282,21 @@ def main(argv: Optional[list] = None) -> int:
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                     
-                    print(f"[{split}] Super resolution complete: {s2.rgb.shape} -> {rgb_final.shape}")
+                    print(f"[{split}] Super resolution complete: {googlemaps.rgb.shape} -> {rgb_final.shape}")
                     
                 except MemoryError as e:
                     print(f"[{split}] Out of memory during super resolution: {e}")
                     print(f"[{split}] Falling back to original resolution")
-                    rgb_final = s2.rgb
+                    rgb_final = googlemaps.rgb
                     mask_final = mask01
                     gc.collect()
                 except Exception as e:
                     print(f"[{split}] Super resolution failed: {e}, using original resolution")
-                    rgb_final = s2.rgb
+                    rgb_final = googlemaps.rgb
                     mask_final = mask01
                     gc.collect()
 
-            name = f"s2_{split}_{counters[split]:06d}"
+            name = f"gm_{split}_{counters[split]:06d}"
             out_img = out_root / split / "images" / f"{name}.png"
             out_lbl = out_root / split / "labels" / f"{name}.png"
             _save_pair(out_img, out_lbl, rgb_final, mask_final)

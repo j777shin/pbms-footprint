@@ -6,20 +6,13 @@ from typing import Optional, Tuple, Dict, Any
 import numpy as np
 
 from .sentinel2 import fetch_sentinel2_rgb_patch_sentinelhub
-from .predict import load_refinenet, predict_refinenet_on_rgb, predict_refinenet_on_rgb_osm, Prediction
+from .predict import load_refinenet, predict_refinenet_on_rgb, Prediction
 from .vectorize import (
     mask_to_polygons_projected,
     clip_polygons_to_radius_m,
     reproject_geoms_to_wgs84,
     geoms_to_geojson_feature_collection,
 )
-from .osm import (
-    fetch_osm_buildings_within_radius,
-    filter_predicted_geoms_by_osm_intersection,
-    prefer_osm_footprints,
-    rasterize_osm_buildings_to_mask,
-)
-from .refine import refine_predictions_with_osm
 from .yolo import predict_yolov8_mask_on_rgb
 from .fuse import fuse_binary_masks, FuseMode
 from .super_resolution import apply_super_resolution_adaptive
@@ -41,9 +34,6 @@ class NearbyBuildingsResult:
     predicted_polygons_wgs84: list
     geojson_predicted: dict
 
-    osm_geojson: Optional[dict]
-    osm_all_buildings_projected: Optional[list] = None  # All OSM buildings for visualization
-
 
 def predict_buildings_near_coordinate(
     *,
@@ -60,12 +50,6 @@ def predict_buildings_near_coordinate(
     # ReFineNet
     refinenet_weights_path: str = "",
     refinenet_threshold: float = 0.5,
-    # OSM
-    use_osm: bool = True,
-    osm_extra_tags: Optional[Dict[str, Any]] = None,
-    osm_filter_predictions: bool = True,
-    osm_prefer_direct: bool = False,  # If True, use OSM footprints directly (most accurate)
-    osm_refine_predictions: bool = False,  # If True, refine predictions by snapping to OSM
     # YOLO
     yolo_weights: Optional[str] = None,
     yolo_device: Optional[str] = None,
@@ -75,7 +59,7 @@ def predict_buildings_near_coordinate(
     fuse_mode: FuseMode = "intersection",
     # Super Resolution (SRDR3)
     use_super_resolution: bool = False,
-    sr_target_resolution_m: float = 2.5,  # Target resolution (e.g., 2.5m from 10m = 4x)
+    sr_target_resolution_m: float = 1.0,  # Target resolution (e.g., 1.0m from 10m = 10x)
     sr_method: str = "srdr3",  # "srdr3" (default), "bicubic", "bilinear", "lanczos", "real_esrgan"
     sr_model_path: Optional[str] = None,  # Optional path to SRDR3 model weights
     sr_device: Optional[str] = None,  # Device for SRDR3 ("cuda", "cpu", or None for auto)
@@ -92,11 +76,16 @@ def predict_buildings_near_coordinate(
 ) -> NearbyBuildingsResult:
     """
     End-to-end:
-    lat/lon -> Sentinel-2 patch -> ReFineNet mask -> optional YOLO fusion ->
+    lat/lon -> Sentinel-2 patch -> ReFineNet mask (optional) -> optional YOLO fusion ->
     polygons -> post-processing -> clip to radius -> optional OSM intersection filter -> GeoJSON.
+    
+    Note: Either refinenet_weights_path or (yolo_weights with fuse_mode="yolo_only") must be provided.
     """
-    if not refinenet_weights_path:
-        raise ValueError("refinenet_weights_path is required")
+    # Validate that at least one model is provided
+    if not refinenet_weights_path and (not yolo_weights or fuse_mode != "yolo_only"):
+        raise ValueError(
+            "Either refinenet_weights_path is required, or yolo_weights with fuse_mode='yolo_only' must be provided"
+        )
 
     s2 = fetch_sentinel2_rgb_patch_sentinelhub(
         lat=lat,
@@ -130,41 +119,18 @@ def predict_buildings_near_coordinate(
         enhanced_patch_px = patch_px
         rgb_original = None  # No need to save separately if no SR was applied
 
-    model = load_refinenet(refinenet_weights_path)
-    
-    # Check if model is 4-channel (ReFineNet4Ch)
-    is_4channel = hasattr(model, 'input_channels') and model.input_channels == 4
-    
-    # For 4-channel models, we need OSM mask as input
-    osm_early = None
-    if is_4channel:
-        # Fetch OSM data early to create the mask
-        osm_early = fetch_osm_buildings_within_radius(
-            lat=lat,
-            lon=lon,
-            radius_m=radius_m,
-            projected_epsg=s2.projected_epsg,
-            extra_tags=osm_extra_tags,
-        )
-        osm_mask01 = rasterize_osm_buildings_to_mask(
-            geoms_projected=osm_early.geoms_projected,
-            bbox_projected=s2.bbox_projected,
-            out_size=enhanced_patch_px,
-        )
-        pred = predict_refinenet_on_rgb_osm(
-            model, rgb_for_prediction, osm_mask01,
-            threshold=refinenet_threshold,
-            model_input_size=(enhanced_patch_px, enhanced_patch_px)
-        )
-    else:
+    # ReFineNet prediction (optional if using YOLO-only mode)
+    pred = None
+    if refinenet_weights_path:
+        model = load_refinenet(refinenet_weights_path)
         pred = predict_refinenet_on_rgb(
             model, rgb_for_prediction, 
             threshold=refinenet_threshold, 
             model_input_size=(enhanced_patch_px, enhanced_patch_px)
         )
 
+    # YOLO prediction
     yolo_mask01 = None
-    fused_mask01 = pred.mask
     if yolo_weights:
         ymask = predict_yolov8_mask_on_rgb(
             rgb_for_prediction,
@@ -175,7 +141,19 @@ def predict_buildings_near_coordinate(
             classes=yolo_classes,
         )
         yolo_mask01 = ymask.mask01
-        fused_mask01 = fuse_binary_masks(pred.mask, ymask.mask01, mode=fuse_mode)
+    
+    # Fuse masks based on mode
+    if fuse_mode == "yolo_only":
+        if yolo_mask01 is None:
+            raise ValueError("yolo_only mode requires yolo_weights to be provided")
+        fused_mask01 = yolo_mask01
+    elif pred is not None:
+        if yolo_mask01 is not None:
+            fused_mask01 = fuse_binary_masks(pred.mask, yolo_mask01, mode=fuse_mode)
+        else:
+            fused_mask01 = pred.mask
+    else:
+        raise ValueError("No predictions available: either refinenet_weights_path or yolo_weights must be provided")
 
     # Apply post-processing to mask before vectorization
     if enable_postprocessing and postprocess_morphological != "none":
@@ -194,14 +172,20 @@ def predict_buildings_near_coordinate(
     clipped = clip_polygons_to_radius_m(vect.polygons_projected, s2.center_projected, radius_m)
     
     # Filter to only the building at the exact coordinate
-    from .osm import filter_to_building_at_coordinate
-    clipped = filter_to_building_at_coordinate(
-        lat=lat,
-        lon=lon,
-        polygons_projected=clipped,
-        center_projected=s2.center_projected,
-        max_distance_m=50.0,  # 50m max distance from coordinate
-    )
+    from shapely.geometry import Point
+    target_point = Point(s2.center_projected[0], s2.center_projected[1])
+    closest_poly = None
+    min_distance = float('inf')
+    for poly in clipped:
+        if poly.contains(target_point):
+            clipped = [poly]
+            break
+        distance = poly.distance(target_point)
+        if distance < min_distance and distance <= 50.0:  # 50m max distance
+            min_distance = distance
+            closest_poly = poly
+    if closest_poly is not None and not any(p.contains(target_point) for p in clipped):
+        clipped = [closest_poly]
 
     # Apply post-processing to polygons
     if enable_postprocessing:
@@ -217,53 +201,11 @@ def predict_buildings_near_coordinate(
             min_perimeter_m=3.0,
         )
 
-    osm_geojson = None
-    osm_all_buildings = None  # Keep all OSM buildings for visualization
-    if use_osm:
-        # Reuse OSM data if already fetched for 4-channel model
-        osm = osm_early if osm_early is not None else fetch_osm_buildings_within_radius(
-            lat=lat,
-            lon=lon,
-            radius_m=radius_m,
-            projected_epsg=s2.projected_epsg,
-            extra_tags=osm_extra_tags,
-        )
-        # Keep all OSM buildings for visualization (not filtered to coordinate)
-        osm_all_buildings = osm.geoms_projected
-        # Calculate OSM building areas in projected CRS (meters)
-        osm_areas = [g.area for g in osm.geoms_projected]
-        osm_wgs84 = reproject_geoms_to_wgs84(osm.geoms_projected, from_epsg=osm.projected_epsg)
-        osm_geojson = geoms_to_geojson_feature_collection(
-            osm_wgs84, 
-            properties={"source": "osm", "building": "yes"},
-            polygon_areas=osm_areas,
-        )
-
-        if osm_prefer_direct:
-            # Use OSM footprints directly (most accurate option)
-            clipped = prefer_osm_footprints(
-                predicted_geoms_projected=clipped,
-                osm_buildings_projected=osm.geoms_projected,
-                fallback_to_predictions=not osm_filter_predictions,
-            )
-        elif osm_refine_predictions:
-            # Refine predictions by snapping to OSM boundaries
-            clipped = refine_predictions_with_osm(
-                predicted_geoms_projected=clipped,
-                osm_buildings_projected=osm.geoms_projected,
-                prefer_osm_when_available=True,
-            )
-        elif osm_filter_predictions:
-            # Filter: only keep predictions that intersect OSM
-            clipped = filter_predicted_geoms_by_osm_intersection(
-                predicted_geoms_projected=clipped,
-                osm_buildings_projected=osm.geoms_projected,
-            )
 
     # Calculate areas in projected CRS (meters) before reprojecting to WGS84
     # This gives accurate area measurements in square meters
     polygon_areas = [g.area for g in clipped]  # Area in square meters (projected CRS)
-    
+
     pred_wgs84 = reproject_geoms_to_wgs84(clipped, from_epsg=s2.projected_epsg)
     
     # Create GeoJSON with accurate area measurements
@@ -276,6 +218,16 @@ def predict_buildings_near_coordinate(
     # Use enhanced RGB if super resolution was applied, otherwise original
     output_rgb = rgb_for_prediction if use_super_resolution else s2.rgb
     
+    # Create a dummy ReFineNet prediction if not available (for YOLO-only mode)
+    if pred is None:
+        from building_footprint_segmentation.geo.predict import Prediction
+        import numpy as np
+        # Create empty prediction with same shape as fused mask
+        pred = Prediction(
+            prob=np.zeros_like(fused_mask01, dtype=np.float32),
+            mask=np.zeros_like(fused_mask01, dtype=np.uint8)
+        )
+    
     return NearbyBuildingsResult(
         rgb_patch=output_rgb,
         rgb_patch_original=rgb_original,  # Original before SR (None if SR not applied)
@@ -287,7 +239,5 @@ def predict_buildings_near_coordinate(
         fused_mask01=fused_mask01,
         predicted_polygons_wgs84=pred_wgs84,
         geojson_predicted=geojson_pred,
-        osm_geojson=osm_geojson,
-        osm_all_buildings_projected=osm_all_buildings,
     )
 

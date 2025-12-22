@@ -170,10 +170,24 @@ def apply_super_resolution(
             import torch
             from PIL import Image
             
+            # Calculate output size to determine if we should use CPU
+            h, w = rgb_uint8.shape[:2]
+            output_size_mb = (h * scale_factor * w * scale_factor * 3 * 4) / (1024 * 1024)  # float32 size
+            
             if device is None:
-                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                # For large scale factors or large output images, use CPU to avoid OOM
+                if scale_factor >= 8 or output_size_mb > 100:
+                    device = torch.device("cpu")
+                    print(f"Using CPU for super resolution (scale={scale_factor}x, output={output_size_mb:.1f}MB) to avoid OOM")
+                else:
+                    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             else:
                 device = torch.device(device)
+            
+            # Warn about large scale factors
+            if scale_factor >= 8 or output_size_mb > 100:
+                print(f"Warning: Large scale factor ({scale_factor}x) will create {output_size_mb:.1f}MB image.")
+                print(f"  Consider using --no-sr or a smaller --sr-target-res (e.g., 2.5m instead of 1.0m)")
             
             # Load SRDR3 model
             model = _load_srdr3_model(scale_factor, device, model_path)
@@ -186,17 +200,30 @@ def apply_super_resolution(
             # Apply super resolution with memory management
             with torch.no_grad():
                 sr_tensor = model(img_tensor)
+                # Clamp to [0, 1] range
                 sr_tensor = torch.clamp(sr_tensor, 0, 1)
+                
+                # Check if output is reasonable (not all zeros or very dark)
+                sr_min = sr_tensor.min().item()
+                sr_max = sr_tensor.max().item()
+                sr_mean = sr_tensor.mean().item()
+                
+                # If output is too dark or suspicious, warn and potentially fall back
+                if sr_max < 0.01 or sr_mean < 0.001:
+                    print(f"Warning: SRDR3 model output is very dark (min={sr_min:.4f}, max={sr_max:.4f}, mean={sr_mean:.4f})")
+                    print("This may indicate an untrained model. Consider using --sr-method bicubic instead.")
+                
+                # Move to CPU and clear GPU memory immediately
+                if device.type == "cuda":
+                    sr_array = sr_tensor[0].permute(1, 2, 0).cpu().numpy()
+                    del sr_tensor, img_tensor
+                    torch.cuda.empty_cache()
+                else:
+                    sr_array = sr_tensor[0].permute(1, 2, 0).numpy()
+                    del sr_tensor, img_tensor
             
-            # Convert back to numpy and free GPU memory immediately
-            sr_array = sr_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
-            
-            # Clear GPU cache to free memory
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            
-            # Delete tensors to free memory
-            del sr_tensor, img_tensor
+            # Ensure values are in [0, 1] range before converting to uint8
+            sr_array = np.clip(sr_array, 0.0, 1.0)
             
             # Handle remainder scaling if needed (e.g., for 10x = 8x + 1.25x)
             h, w = rgb_uint8.shape[:2]
@@ -206,13 +233,27 @@ def apply_super_resolution(
             if actual_h != target_h or actual_w != target_w:
                 # Apply final interpolation to reach exact target size
                 import cv2
+                # Convert to uint8 before resizing
+                sr_uint8 = (sr_array * 255.0).astype(np.uint8)
                 sr_array = cv2.resize(
-                    (sr_array * 255.0).astype(np.uint8),
+                    sr_uint8,
                     (target_w, target_h),
                     interpolation=cv2.INTER_CUBIC
                 )
             else:
                 sr_array = (sr_array * 255.0).astype(np.uint8)
+            
+            # Final check: ensure output is visible
+            if sr_array.max() < 10:
+                print(f"Warning: Final SR output is very dark (max={sr_array.max()}). Using bicubic fallback.")
+                # Fall back to bicubic
+                import cv2
+                h, w = rgb_uint8.shape[:2]
+                sr_array = cv2.resize(
+                    rgb_uint8,
+                    (w * scale_factor, h * scale_factor),
+                    interpolation=cv2.INTER_CUBIC
+                )
             
             return sr_array
             
@@ -291,7 +332,7 @@ def apply_super_resolution(
 
 def apply_super_resolution_adaptive(
     rgb_uint8: np.ndarray,
-    target_resolution_m: float = 2.5,  # Target resolution in meters (e.g., 2.5m from 10m)
+    target_resolution_m: float = 1.0,  # Target resolution in meters (e.g., 1.0m from 10m = 10x)
     source_resolution_m: float = 10.0,
     method: str = "srdr3",
     use_deep_model: bool = True,
